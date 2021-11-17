@@ -3326,6 +3326,10 @@
 
 - func: pixel_unshuffle(Tensor self, int downscale_factor) -> Tensor
 
+- func: quantized_pixel_shuffle(Tensor self, int upscale_factor) -> Tensor
+  dispatch:
+    QuantizedCPU: quantized_pixel_shuffle
+
 - func: channel_shuffle(Tensor self, int groups) -> Tensor
   dispatch:
     CPU: channel_shuffle
