@@ -71,6 +71,14 @@ void convert_indices_from_coo_to_csr_cpu(const Tensor& result, const Tensor& inp
 }
 
 template <typename F, typename ...Args>
+Tensor& unary_inplace_op_(F op_, Tensor& self, Args&&... args) {
+  TORCH_INTERNAL_ASSERT(self.is_sparse_csr());
+  auto values = self.values();
+  (self.values().*op_)(std::forward<Args>(args)...);
+  return self;
+}
+
+template <typename F, typename ...Args>
 Tensor& unary_op_out(F op_out, const Tensor& self, Tensor& result, Args&&... args) {
   TORCH_INTERNAL_ASSERT(self.is_sparse_csr());
   TORCH_INTERNAL_ASSERT(result.is_sparse_csr());
@@ -161,6 +169,10 @@ static constexpr bool is_mkl_supported() {
 // See: https://github.com/pytorch/pytorch/issues/58770
 bool is_square_or_vec(int64_t dim_i, int64_t dim_j, int64_t dim_k) {
   return (dim_i == dim_k  && dim_k == dim_j) || (dim_i == dim_j && dim_k == 1);
+}
+
+Tensor& normal_sparse_csr_(Tensor& self, double mean, double std, c10::optional<Generator> gen) {
+  return unary_inplace_op_(&Tensor::normal_, self, mean, std, gen);
 }
 
 Tensor& sin_sparse_csr_out(const Tensor& self, Tensor& result) {
