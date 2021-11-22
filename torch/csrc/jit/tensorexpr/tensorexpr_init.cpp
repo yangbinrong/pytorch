@@ -887,6 +887,8 @@ void initTensorExprBindings(PyObject* module) {
       });
   te.def("annotate_input_shapes", &tensorexpr::annotateInputShapes);
   te.def("remove_unused_self_argument", &tensorexpr::removeUnusedSelfArgument);
+  te.def("is_graph_compilable", &tensorexpr::isGraphCompilable);
+  te.def("fixup_missing_shape_info", &tensorexpr::fixupMissingShapeInfo);
 #ifdef TORCH_ENABLE_LLVM
   te.def("set_llvm_target_triple", [](const c10::optional<std::string>& val) {
     tensorexpr::LLVMTargetTriple() = val;
