@@ -1495,6 +1495,15 @@ TEST(LiteInterpreterUpgraderTest, DivTensorV2) {
   auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
   test_model_file.append("upgrader_models/test_versioned_div_tensor_v2.ptl");
   mobile::Module m_module = _load_for_mobile(test_model_file);
+
+  auto intrsuction_list =
+      m_module.get_method("forward").function().get_code()->instructions_;
+  uint64_t number_of_call_instruction = 0;
+  for (auto& instruction : intrsuction_list) {
+    number_of_call_instruction += (instruction.op == OpCode::CALL);
+  }
+  ASSERT_EQ(number_of_call_instruction, 3);
+
   std::vector<IValue> inputs = {
       IValue(6 * torch::ones({1})), IValue(3 * torch::ones({1}))};
   auto actual_output = m_module.forward(inputs);
