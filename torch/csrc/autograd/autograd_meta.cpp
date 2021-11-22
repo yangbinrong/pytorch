@@ -1,5 +1,8 @@
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <c10/util/irange.h>
 #include <torch/csrc/autograd/variable.h>
+#include <ATen/ops/zeros.h>
+#include <ATen/ops/_new_zeros_with_same_feature_meta.h>
 
 namespace torch {
 namespace autograd {
