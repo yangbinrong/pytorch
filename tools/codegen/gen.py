@@ -171,14 +171,30 @@ def static_dispatch_keys(backend: Optional[BackendIndex]) -> List[DispatchKey]:
             DispatchKey.CompositeExplicitAutograd
         ]
 
-def static_dispatch_extra_headers(backend: Optional[BackendIndex], skip_tensor_include: bool = False) -> str:
-    if skip_tensor_include:
-        # See Note [Avoiding Include Cycles In Static Dispatch]
-        maybe_inl = '_inl'
-    else:
-        maybe_inl = ''
-    return '\n'.join([
-        f'#include <ATen/{dispatch_key}Functions{maybe_inl}.h>' for dispatch_key in static_dispatch_keys(backend)])
+def get_static_dispatch_backend(f: NativeFunction, backend_index: BackendIndex) -> Optional[DispatchKey]:
+    if (f.structured_delegate is not None or backend_index.has_kernel(f)):
+        # TODO: for ops with structured_delegate it should check the dispatch table of
+        # the out variant instead. For now, these structured ops all have CPU/CUDA kernels
+        # so we always dispatch to the `backend`, but this could be wrong when we
+        # migrate math/default_backend ops to use structured delegate.
+        return backend_index.dispatch_key
+    elif f.has_composite_explicit_autograd_kernel:
+        return DispatchKey.CompositeExplicitAutograd
+    elif f.has_composite_implicit_autograd_kernel:
+        return DispatchKey.CompositeImplicitAutograd
+    return None
+
+
+def static_dispatch_ops_header(
+        f: NativeFunction,
+        backend_index: Optional[BackendIndex]) -> Optional[str]:
+    if backend_index is None or f.manual_kernel_registration:
+        return None
+
+    dispatch_key = get_static_dispatch_backend(f, backend_index)
+    return (f'#include <ATen/ops/{f.root_name}_{dispatch_key.lower()}_dispatch.h>'
+            if dispatch_key is not None else None)
+
 
 def static_dispatch(
     f: NativeFunction, cpp_sig: CppSignature,
@@ -191,19 +207,9 @@ def static_dispatch(
     exprs = translate(cpp_sig.arguments(), target_sig.arguments(), method=method)
     exprs_str = ', '.join(a.expr for a in exprs)
 
-    if f.structured_delegate is not None:
-        # TODO: for ops with structured_delegate it should check the dispatch table of
-        # the out variant instead. For now, these structured ops all have CPU/CUDA kernels
-        # so we always dispatch to the `backend`, but this could be wrong when we
-        # migrate math/default_backend ops to use structured delegate.
-        return f'return at::{backend_index.dispatch_key.lower()}::{name}({exprs_str});'
-
-    if backend_index.has_kernel(f):
-        return f'return at::{backend_index.dispatch_key.lower()}::{name}({exprs_str});'
-    elif f.has_composite_explicit_autograd_kernel:
-        return f'return at::{DispatchKey.CompositeExplicitAutograd.lower()}::{name}({exprs_str});'
-    elif f.has_composite_implicit_autograd_kernel:
-        return f'return at::{DispatchKey.CompositeImplicitAutograd.lower()}::{name}({exprs_str});'
+    dispatch_key = get_static_dispatch_backend(f, backend_index)
+    if dispatch_key is not None:
+        return f'return at::{dispatch_key.lower()}::{name}({exprs_str});'
 
     return f'TORCH_CHECK(false, "Static dispatch does not support {name} for {backend_index.dispatch_key}.");'
 
@@ -975,7 +981,6 @@ def gen_headers(
         name = group.root_name
         grouped_functions_by_root_name[name].append(group)
 
-    static_dispatch_headers = static_dispatch_extra_headers(static_dispatch_idx)
     for name, functions in functions_by_root_name.items():
         ops_fm.write_with_template(
             f'{name}_ops.h', 'Operator.h', lambda: {
@@ -985,7 +990,9 @@ def gen_headers(
 
         ops_fm.write_with_template(
             f'{name}.h', 'Function.h', lambda: {
-                'static_dispatch_extra_headers': static_dispatch_headers,
+                'static_dispatch_ops_headers': list(mapMaybe(
+                    lambda fn: static_dispatch_ops_header(fn, backend_index=static_dispatch_idx),
+                    functions)),
                 'operator_includes': f'#include <ATen/ops/{name}_ops.h>',
                 'function_definitions': list(mapMaybe(ComputeFunction(
                     static_dispatch_backend_index=static_dispatch_idx), functions)),
@@ -1088,7 +1095,9 @@ def gen_headers(
             for name, functions in functions_by_root_name.items()
             if any(Variant.method in fn.variants for fn in functions)
         ],
-        'static_dispatch_extra_headers': static_dispatch_extra_headers(static_dispatch_idx, skip_tensor_include=True),
+        'static_dispatch_ops_headers': list(mapMaybe(
+            lambda fn: static_dispatch_ops_header(fn, backend_index=static_dispatch_idx),
+            [fn for fn in native_functions if Variant.method in fn.variants])),
         'tensor_method_declarations': list(mapMaybe(ComputeTensorMethod(
             target=Target.DECLARATION, static_dispatch_backend_index=static_dispatch_idx), native_functions)),
         'tensor_method_definitions': list(mapMaybe(ComputeTensorMethod(
@@ -1137,16 +1146,31 @@ def gen_source_files(
     for dispatch_key in dispatch_keys:
         fm = cuda_fm if is_cuda_dispatch_key(dispatch_key) else cpu_fm
 
+        backend_index = backend_indices[dispatch_key]
+        dispatch_namespace = str(dispatch_key).lower()
         fm.write_with_template(f'Register{dispatch_key}.cpp', 'RegisterDispatchKey.cpp', lambda: {
             'extra_cuda_headers': extra_cuda_headers if is_cuda_dispatch_key(dispatch_key) else '',
             'external_backend_headers': '',
-            'namespaced_headers': f'#include <ATen/{dispatch_key}Functions.h>' if dispatch_key in functions_keys else '',
+            'dispatch_headers': dest.gen_registration_headers(backend_index),
+            'ops_headers': list(set(
+                (f"""
+#include <ATen/ops/{fn.root_name}_native.h>
+""" if dispatch_key != DispatchKey.CompositeExplicitAutograd else f"""\
+#include <ATen/ops/{fn.root_name}.h>
+#include <ATen/ops/{fn.root_name}_native.h>
+""") + (f"""\
+#include <ATen/ops/{fn.root_name}_{dispatch_namespace}_dispatch.h>
+""" if dispatch_key in functions_keys else "")
+                for fn in native_functions if backend_index.has_kernel(fn) or (
+                    fn.structured and dispatch_key in
+                    (DispatchKey.Meta, DispatchKey.CompositeExplicitAutograd))
+            )),
             'DispatchKey': dispatch_key,
             'dispatch_namespace': dispatch_key.lower(),
-            'dispatch_helpers': dest.gen_registration_helpers(backend_indices[dispatch_key]),
+            'dispatch_helpers': dest.gen_registration_helpers(backend_index),
             'dispatch_namespaced_definitions': list(concatMap(
                 dest.RegisterDispatchKey(
-                    backend_indices[dispatch_key],
+                    backend_index,
                     Target.NAMESPACED_DEFINITION,
                     selector,
                     rocm=rocm,
@@ -1156,7 +1180,7 @@ def gen_source_files(
             )),
             'dispatch_anonymous_definitions': list(concatMap(
                 dest.RegisterDispatchKey(
-                    backend_indices[dispatch_key],
+                    backend_index,
                     Target.ANONYMOUS_DEFINITION,
                     selector,
                     rocm=rocm,
@@ -1166,7 +1190,7 @@ def gen_source_files(
             )),
             'dispatch_registrations': list(concatMap(
                 dest.RegisterDispatchKey(
-                    backend_indices[dispatch_key],
+                    backend_index,
                     Target.REGISTRATION,
                     selector,
                     rocm=rocm,
