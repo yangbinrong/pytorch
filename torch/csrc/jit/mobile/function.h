@@ -15,6 +15,7 @@ struct OperatorString;
 
 namespace mobile {
 struct Code;
+struct Instruction;
 
 class TORCH_API Function : public torch::jit::Function {
  public:
