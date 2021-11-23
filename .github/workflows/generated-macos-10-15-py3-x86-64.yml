@@ -101,7 +101,7 @@ jobs:
     timeout-minutes: 240
     env:
       ENABLE_DISTRIBUTED_TEST: 1
-      NUM_TEST_SHARDS: 2
+      NUM_TEST_SHARDS: 1
       PR_BODY: ${{ github.event.pull_request.body }}
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
